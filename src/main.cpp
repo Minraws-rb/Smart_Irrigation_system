@@ -13,7 +13,7 @@ const char* password = "12345678";      // AP password (min 8 characters)
 // Motor driver pin definitions
 #define ENA 23           // Enable A
 #define ENB 22           // Enable B
-#define IN1 35           // Input 1
+#define IN1 26           // Input 1 (changed from 35 - GPIO35 is input-only!)
 #define IN2 32           // Input 2
 #define IN3 33           // Input 3
 #define IN4 25           // Input 4
@@ -22,10 +22,10 @@ const char* password = "12345678";      // AP password (min 8 characters)
 WebServer server(80);
 int motorMixTime = 180;  // Default 180 seconds (3 minutes)
 bool systemRunning = false;
-bool motorRunning = false;
-bool pumpRunning = false;
-unsigned long motorStartTime = 0;
-unsigned long motorEndTime = 0;
+bool motor1Running = false;  // ENB motor (mixing motor)
+bool motor2Running = false;  // ENA motor (pump motor)
+unsigned long motor1StartTime = 0;
+unsigned long motor1EndTime = 0;
 
 // HTML page (your irrigation control interface)
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -432,8 +432,8 @@ void handleRoot() {
 void handleStatus() {
   String json = "{";
   json += "\"systemRunning\":" + String(systemRunning ? "true" : "false") + ",";
-  json += "\"motorRunning\":" + String(motorRunning ? "true" : "false") + ",";
-  json += "\"pumpRunning\":" + String(pumpRunning ? "true" : "false") + ",";
+  json += "\"motorRunning\":" + String(motor1Running ? "true" : "false") + ",";
+  json += "\"pumpRunning\":" + String(motor2Running ? "true" : "false") + ",";
   json += "\"motorTime\":" + String(motorMixTime) + ",";
   json += "\"rssi\":" + String(WiFi.RSSI());
   json += "}";
@@ -460,22 +460,25 @@ void handleSetMotorTime() {
 void handleStart() {
   if (!systemRunning) {
     systemRunning = true;
-    motorRunning = true;
-    motorStartTime = millis();
-    motorEndTime = motorStartTime + (motorMixTime * 1000);
+    motor1Running = true;  // Start ENB motor (mixing motor)
+    motor2Running = false;
+    motor1StartTime = millis();
+    motor1EndTime = motor1StartTime + (motorMixTime * 1000);
     digitalWrite(LED_PIN, HIGH);  // Turn on LED when motor starts
     
-    // Start motor
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
+    // Start Motor 1 (ENB side - mixing motor)
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
-    digitalWrite(ENA, HIGH);
     digitalWrite(ENB, HIGH);
+    
+    // Ensure Motor 2 is off
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(ENA, LOW);
     
     String json = "{\"success\":true,\"motorTime\":" + String(motorMixTime) + "}";
     server.send(200, "application/json", json);
-    Serial.println("System started! Motor mixing for " + String(motorMixTime) + " seconds");
+    Serial.println("System started! Motor 1 (ENB) mixing for " + String(motorMixTime) + " seconds");
   } else {
     server.send(200, "application/json", "{\"success\":false,\"error\":\"System already running\"}");
   }
@@ -484,11 +487,11 @@ void handleStart() {
 // Handle stop system
 void handleStop() {
   systemRunning = false;
-  motorRunning = false;
-  pumpRunning = false;
+  motor1Running = false;
+  motor2Running = false;
   digitalWrite(LED_PIN, LOW);  // Turn off LED
   
-  // Stop motor
+  // Stop both motors
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
@@ -497,7 +500,7 @@ void handleStop() {
   digitalWrite(ENB, LOW);
   
   server.send(200, "application/json", "{\"success\":true}");
-  Serial.println("System stopped");
+  Serial.println("System stopped - Both motors OFF");
 }
 
 void setup() {
@@ -562,26 +565,29 @@ void setup() {
 void loop() {
   server.handleClient();
   
-  // Handle motor timing (LED blinks for the set duration)
-  if (systemRunning && motorRunning) {
+  // Handle two-stage motor operation
+  if (systemRunning) {
     unsigned long currentTime = millis();
     
-    // Check if motor mixing time is complete
-    if (currentTime >= motorEndTime) {
-      motorRunning = false;
-      pumpRunning = true;  // Start pump after motor finishes
-      digitalWrite(LED_PIN, LOW);  // Turn off LED
-      
-      // Stop motor
-      digitalWrite(IN1, LOW);
-      digitalWrite(IN2, LOW);
-      digitalWrite(IN3, LOW);
-      digitalWrite(IN4, LOW);
-      digitalWrite(ENA, LOW);
-      digitalWrite(ENB, LOW);
-      
-      Serial.println("Motor mixing complete! Pump starting...");
+    // Stage 1: Motor 1 (ENB) runs for specified time
+    if (motor1Running) {
+      if (currentTime >= motor1EndTime) {
+        // Stop Motor 1 (ENB)
+        motor1Running = false;
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
+        digitalWrite(ENB, LOW);
+        
+        // Start Motor 2 (ENA) - runs until STOP is pressed
+        motor2Running = true;
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        digitalWrite(ENA, HIGH);
+        
+        Serial.println("Motor 1 (ENB) complete! Motor 2 (ENA) started - will run until STOP");
+      }
     }
-    // Motor continues running for the set duration (no blinking)
+    // Stage 2: Motor 2 (ENA) continues running until user presses STOP
+    // No automatic stop for Motor 2
   }
 }
