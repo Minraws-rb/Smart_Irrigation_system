@@ -7,21 +7,16 @@ const char* ssid = "ESP32_Irrigation";  // AP name - ESP32 creates its own WiFi 
 const char* password = "12345678";      // AP password (min 8 characters)
 
 // Pin definitions
-#define LED_PIN 2        // Built-in LED for status indicator
+#define LED_PIN 2        // Built-in LED for motor mixing indicator
+#define PUMP_PIN 4       // Pin for pump control (if needed later)
 
-// Motor Driver Pins (L298N or similar)
-#define MOTOR_IN1 25     // Motor direction pin 1
-#define MOTOR_IN2 26     // Motor direction pin 2
-#define MOTOR_EN 27      // Motor enable/PWM pin (speed control)
-
-// Pump/Spray Motor Pins
-#define PUMP_IN1 32      // Pump direction pin 1
-#define PUMP_IN2 33      // Pump direction pin 2
-#define PUMP_EN 14       // Pump enable/PWM pin
-
-// Motor speed (0-255)
-#define MOTOR_SPEED 200  // Mixing motor speed (adjust as needed)
-#define PUMP_SPEED 255   // Pump motor speed (full speed)
+// Motor driver pin definitions
+#define ENA 23           // Enable A
+#define ENB 22           // Enable B
+#define IN1 35           // Input 1
+#define IN2 32           // Input 2
+#define IN3 33           // Input 3
+#define IN4 25           // Input 4
 
 // Global variables
 WebServer server(80);
@@ -428,35 +423,6 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// Motor control functions
-void startMotor() {
-  digitalWrite(MOTOR_IN1, HIGH);
-  digitalWrite(MOTOR_IN2, LOW);
-  analogWrite(MOTOR_EN, MOTOR_SPEED);
-  Serial.println("✅ Mixing motor started at speed: " + String(MOTOR_SPEED));
-}
-
-void stopMotor() {
-  digitalWrite(MOTOR_IN1, LOW);
-  digitalWrite(MOTOR_IN2, LOW);
-  analogWrite(MOTOR_EN, 0);
-  Serial.println("⏹ Mixing motor stopped");
-}
-
-void startPump() {
-  digitalWrite(PUMP_IN1, HIGH);
-  digitalWrite(PUMP_IN2, LOW);
-  analogWrite(PUMP_EN, PUMP_SPEED);
-  Serial.println("✅ Spray pump started at speed: " + String(PUMP_SPEED));
-}
-
-void stopPump() {
-  digitalWrite(PUMP_IN1, LOW);
-  digitalWrite(PUMP_IN2, LOW);
-  analogWrite(PUMP_EN, 0);
-  Serial.println("⏹ Spray pump stopped");
-}
-
 // Handle root page
 void handleRoot() {
   server.send(200, "text/html", htmlPage);
@@ -497,14 +463,19 @@ void handleStart() {
     motorRunning = true;
     motorStartTime = millis();
     motorEndTime = motorStartTime + (motorMixTime * 1000);
+    digitalWrite(LED_PIN, HIGH);  // Turn on LED when motor starts
     
-    // Start motor and LED indicator
-    startMotor();
-    digitalWrite(LED_PIN, HIGH);
+    // Start motor
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    digitalWrite(ENA, HIGH);
+    digitalWrite(ENB, HIGH);
     
     String json = "{\"success\":true,\"motorTime\":" + String(motorMixTime) + "}";
     server.send(200, "application/json", json);
-    Serial.println("🚀 System started! Motor mixing for " + String(motorMixTime) + " seconds");
+    Serial.println("System started! Motor mixing for " + String(motorMixTime) + " seconds");
   } else {
     server.send(200, "application/json", "{\"success\":false,\"error\":\"System already running\"}");
   }
@@ -512,37 +483,25 @@ void handleStart() {
 
 // Handle stop system
 void handleStop() {
+  systemRunning = false;
+  motorRunning = false;
+  pumpRunning = false;
+  digitalWrite(LED_PIN, LOW);  // Turn off LED
   
-  // Stop both motors and LED
-  stopMotor();
-  stopPump();
-  digitalWrite(LED_PIN, LOW);
-  
-  server.send(200, "application/json", "{\"success\":true}");
-  Serial.println("🛑 System stopped - All motors off/ Turn off LED
+  // Stop motor
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  digitalWrite(ENA, LOW);
+  digitalWrite(ENB, LOW);
   
   server.send(200, "application/json", "{\"success\":true}");
   Serial.println("System stopped");
 }
-digitalWrite(LED_PIN, LOW);
-  
-  // Initialize Motor Driver Pins (Mixing Motor)
-  pinMode(MOTOR_IN1, OUTPUT);
-  pinMode(MOTOR_IN2, OUTPUT);
-  pinMode(MOTOR_EN, OUTPUT);
-  digitalWrite(MOTOR_IN1, LOW);
-  digitalWrite(MOTOR_IN2, LOW);
-  analogWrite(MOTOR_EN, 0);
-  
-  // Initialize Pump Motor Pins
-  pinMode(PUMP_IN1, OUTPUT);
-  pinMode(PUMP_IN2, OUTPUT);
-  pinMode(PUMP_EN, OUTPUT);
-  digitalWrite(PUMP_IN1, LOW);
-  digitalWrite(PUMP_IN2, LOW);
-  analogWrite(PUMP_EN, 0);
-  
-  Serial.println("🔧 Motor driver pins initialized"
+
+void setup() {
+  Serial.begin(115200);
   delay(1000);
   
   // Initialize LED pin
@@ -550,6 +509,22 @@ digitalWrite(LED_PIN, LOW);
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(PUMP_PIN, LOW);
+  
+  // Initialize motor driver pins
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  
+  // Ensure motor is stopped initially
+  digitalWrite(ENA, LOW);
+  digitalWrite(ENB, LOW);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
   
   Serial.println("\n\n=== ESP32 Irrigation Control System ===");
   
@@ -567,33 +542,24 @@ digitalWrite(LED_PIN, LOW);
   Serial.print("🌐 IP Address: ");
   Serial.println(IP);
   Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  Serial.println("\n📱 I
-  if (systemRunning && motorRunning) {
-    unsigned long currentTime = millis();
-    
-    // Check if motor mixing time is complete
-    if (currentTime >= motorEndTime) {
-      motorRunning = false;
-      pumpRunning = true;
-      
-      // Stop mixing motor
-      stopMotor();
-      
-      // Start spray pump
-      startPump();
-      
-      // Blink LED to indicate pump mode
-      digitalWrite(LED_PIN, LOW);
-      Serial.println("✅ Motor mixing complete! Spray pump started...");
-    }
-  }
+  Serial.println("\n📱 INSTRUCTIONS:");
+  Serial.println("1. Connect your phone/laptop to WiFi: " + String(ssid));
+  Serial.println("2. Open browser and go to: http://" + IP.toString());
+  Serial.println();
   
-  // Blink LED while system is active (status indicator)
-  if (systemRunning) {
-    static unsigned long lastBlink = 0;
-    if (millis() - lastBlink >= 500) {
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-      lastBlink = millis();op() {
+  // Set up web server routes
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/setMotorTime", handleSetMotorTime);
+  server.on("/start", handleStart);
+  server.on("/stop", handleStop);
+  
+  server.begin();
+  Serial.println("Web server started!");
+  Serial.println("=====================================\n");
+}
+
+void loop() {
   server.handleClient();
   
   // Handle motor timing (LED blinks for the set duration)
@@ -605,15 +571,17 @@ digitalWrite(LED_PIN, LOW);
       motorRunning = false;
       pumpRunning = true;  // Start pump after motor finishes
       digitalWrite(LED_PIN, LOW);  // Turn off LED
+      
+      // Stop motor
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      digitalWrite(ENA, LOW);
+      digitalWrite(ENB, LOW);
+      
       Serial.println("Motor mixing complete! Pump starting...");
-    } else {
-      // Blink LED while motor is running (500ms on, 500ms off)
-      unsigned long blinkTime = currentTime % 1000;
-      if (blinkTime < 500) {
-        digitalWrite(LED_PIN, HIGH);
-      } else {
-        digitalWrite(LED_PIN, LOW);
-      }
     }
+    // Motor continues running for the set duration (no blinking)
   }
 }
