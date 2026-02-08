@@ -297,6 +297,10 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                 <span class="status-value" id="motorTime">180 seconds</span>
             </div>
             <div class="status-item">
+                <span class="status-label">⏱️ Time Remaining</span>
+                <span class="status-value" id="timeRemaining" style="font-weight: bold; color: #667eea;">--</span>
+            </div>
+            <div class="status-item">
                 <span class="status-label">WiFi Signal</span>
                 <span class="status-value" id="wifiSignal">-- dBm</span>
             </div>
@@ -354,6 +358,16 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                     
                     // Motor time
                     document.getElementById('motorTime').textContent = data.motorTime + ' seconds';
+                    
+                    // Time remaining countdown
+                    if (data.timeRemaining !== undefined && data.timeRemaining >= 0) {
+                        const minutes = Math.floor(data.timeRemaining / 60);
+                        const seconds = data.timeRemaining % 60;
+                        document.getElementById('timeRemaining').textContent = 
+                            minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
+                    } else {
+                        document.getElementById('timeRemaining').textContent = '--';
+                    }
                     
                     // WiFi signal
                     document.getElementById('wifiSignal').textContent = data.rssi + ' dBm';
@@ -430,11 +444,24 @@ void handleRoot() {
 
 // Handle status request
 void handleStatus() {
+  int timeRemaining = -1;
+  
+  // Calculate remaining time if motor is running
+  if (motor1Running && systemRunning) {
+    unsigned long currentTime = millis();
+    if (currentTime < motor1EndTime) {
+      timeRemaining = (motor1EndTime - currentTime) / 1000;
+    } else {
+      timeRemaining = 0;
+    }
+  }
+  
   String json = "{";
   json += "\"systemRunning\":" + String(systemRunning ? "true" : "false") + ",";
   json += "\"motorRunning\":" + String(motor1Running ? "true" : "false") + ",";
   json += "\"pumpRunning\":" + String(motor2Running ? "true" : "false") + ",";
   json += "\"motorTime\":" + String(motorMixTime) + ",";
+  json += "\"timeRemaining\":" + String(timeRemaining) + ",";
   json += "\"rssi\":" + String(WiFi.RSSI());
   json += "}";
   server.send(200, "application/json", json);
