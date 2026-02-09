@@ -1,4 +1,4 @@
-#include <Arduino.h>
+ #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 
@@ -10,13 +10,22 @@ const char* password = "12345678";      // AP password (min 8 characters)
 #define LED_PIN 2        // Built-in LED for motor mixing indicator
 #define PUMP_PIN 4       // Pin for pump control (if needed later)
 
+// Ultrasonic sensor pin definitions
+#define TRIG_PIN 19      // Ultrasonic sensor trigger pin
+#define ECHO_PIN 21      // Ultrasonic sensor echo pin
+
 // Motor driver pin definitions
 #define ENA 23           // Enable A
 #define ENB 22           // Enable B
-#define IN1 26           // Input 1 (changed from 35 - GPIO35 is input-only!)
+#define IN1 26           // Input 1
 #define IN2 32           // Input 2
 #define IN3 33           // Input 3
 #define IN4 25           // Input 4
+
+// Vessel parameters
+const float VESSEL_HEIGHT = 16.0;    // Height of vessel in cm
+const float VESSEL_AREA = 153.0;     // Base area in cm² (circle)
+const float EMPTY_THRESHOLD = 0.6;   // Consider empty if water height < 1cm
 
 // Global variables
 WebServer server(80);
@@ -26,6 +35,11 @@ bool motor1Running = false;  // ENB motor (mixing motor)
 bool motor2Running = false;  // ENA motor (pump motor)
 unsigned long motor1StartTime = 0;
 unsigned long motor1EndTime = 0;
+
+// Water volume variables
+float waterDistance = 0;    // Distance from sensor to water surface in cm
+float waterHeight = 0;      // Height of water in vessel in cm
+float waterVolume = 0;      // Volume of water in cm³
 
 // HTML page (your irrigation control interface)
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -301,6 +315,14 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                 <span class="status-value" id="timeRemaining" style="font-weight: bold; color: #667eea;">--</span>
             </div>
             <div class="status-item">
+                <span class="status-label">💧 Water Height</span>
+                <span class="status-value" id="waterHeight">-- cm</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">🚰 Water Volume</span>
+                <span class="status-value" id="waterVolume" style="font-weight: bold; color: #2196F3;">-- L</span>
+            </div>
+            <div class="status-item">
                 <span class="status-label">WiFi Signal</span>
                 <span class="status-value" id="wifiSignal">-- dBm</span>
             </div>
@@ -367,6 +389,20 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                             minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
                     } else {
                         document.getElementById('timeRemaining').textContent = '--';
+                    }
+                    
+                    // Water measurements
+                    if (data.waterHeight !== undefined) {
+                        document.getElementById('waterHeight').textContent = data.waterHeight.toFixed(1) + ' cm';
+                    } else {
+                        document.getElementById('waterHeight').textContent = '-- cm';
+                    }
+                    
+                    if (data.waterVolume !== undefined) {
+                        const liters = (data.waterVolume / 1000.0).toFixed(2);
+                        document.getElementById('waterVolume').textContent = liters + ' L (' + data.waterVolume.toFixed(0) + ' cm³)';
+                    } else {
+                        document.getElementById('waterVolume').textContent = '-- L';
                     }
                     
                     // WiFi signal
@@ -437,6 +473,83 @@ const char htmlPage[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+// Function to measure distance using ultrasonic sensor
+float measureDistance() {
+  long duration;
+  float distanceCm;
+  
+  // Clear the trigger pin
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  
+  // Send 10us pulse to trigger
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  // Read the echo pin
+  duration = pulseIn(ECHO_PIN, HIGH, 30000);  // 30ms timeout
+  
+  // Calculate distance in cm
+  // Speed of sound = 343 m/s = 0.0343 cm/µs
+  // Distance = (duration / 2) * speed of sound
+  if (duration == 0) {
+    return -1;  // Measurement failed
+  }
+  
+  distanceCm = (duration * 0.0343) / 2.0;
+  return distanceCm;
+}
+
+// Function to update water measurements
+void updateWaterMeasurements() {
+  waterDistance = measureDistance();
+  
+  Serial.println("========== Water Measurement ==========");
+  
+  if (waterDistance > 0 && waterDistance < 400) {  // Valid range
+    // Calculate water height
+    waterHeight = VESSEL_HEIGHT - waterDistance;
+    
+    // Ensure water height is not negative
+    if (waterHeight < 0) {
+      waterHeight = 0;
+    }
+    
+    // Calculate water volume (Area × Height)
+    waterVolume = VESSEL_AREA * waterHeight;
+    
+    // Print measurements to Serial Monitor
+    Serial.print("Distance from sensor: ");
+    Serial.print(waterDistance);
+    Serial.println(" cm");
+    
+    Serial.print("Water height: ");
+    Serial.print(waterHeight);
+    Serial.println(" cm");
+    
+    Serial.print("Water volume: ");
+    Serial.print(waterVolume);
+    Serial.print(" cm³ (");
+    Serial.print(waterVolume / 1000.0);
+    Serial.println(" Liters)");
+    
+    Serial.print("Fill percentage: ");
+    Serial.print((waterHeight / VESSEL_HEIGHT) * 100.0);
+    Serial.println(" %");
+  } else {
+    // Invalid reading
+    waterHeight = 0;
+    waterVolume = 0;
+    
+    Serial.println("⚠️ Invalid ultrasonic reading!");
+    Serial.print("Distance: ");
+    Serial.println(waterDistance);
+  }
+  
+  Serial.println("=======================================\n");
+}
+
 // Handle root page
 void handleRoot() {
   server.send(200, "text/html", htmlPage);
@@ -462,6 +575,8 @@ void handleStatus() {
   json += "\"pumpRunning\":" + String(motor2Running ? "true" : "false") + ",";
   json += "\"motorTime\":" + String(motorMixTime) + ",";
   json += "\"timeRemaining\":" + String(timeRemaining) + ",";
+  json += "\"waterHeight\":" + String(waterHeight, 1) + ",";
+  json += "\"waterVolume\":" + String(waterVolume, 1) + ",";
   json += "\"rssi\":" + String(WiFi.RSSI());
   json += "}";
   server.send(200, "application/json", json);
@@ -540,6 +655,10 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   digitalWrite(PUMP_PIN, LOW);
   
+  // Initialize ultrasonic sensor pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
   // Initialize motor driver pins
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
@@ -592,6 +711,13 @@ void setup() {
 void loop() {
   server.handleClient();
   
+  // Update water measurements periodically
+  static unsigned long lastMeasurement = 0;
+  if (millis() - lastMeasurement >= 500) {  // Measure every 500ms
+    updateWaterMeasurements();
+    lastMeasurement = millis();
+  }
+  
   // Handle two-stage motor operation
   if (systemRunning) {
     unsigned long currentTime = millis();
@@ -605,13 +731,29 @@ void loop() {
         digitalWrite(IN4, LOW);
         digitalWrite(ENB, LOW);
         
-        // Start Motor 2 (ENA) - runs until STOP is pressed
+        // Start Motor 2 (ENA) - runs until STOP is pressed or vessel is empty
         motor2Running = true;
         digitalWrite(IN1, HIGH);
         digitalWrite(IN2, LOW);
         digitalWrite(ENA, HIGH);
         
-        Serial.println("Motor 1 (ENB) complete! Motor 2 (ENA) started - will run until STOP");
+        Serial.println("Motor 1 (ENB) complete! Motor 2 (ENA) started - will run until STOP or vessel empty");
+      }
+    }
+    
+    // Stage 2: Motor 2 (ENA) - auto-stop if vessel is empty
+    if (motor2Running) {
+      if (waterHeight < EMPTY_THRESHOLD) {
+        // Vessel is empty, stop the pump
+        motor2Running = false;
+        systemRunning = false;
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(ENA, LOW);
+        digitalWrite(LED_PIN, LOW);
+        
+        Serial.println("Vessel empty! Motor 2 (ENA) stopped automatically");
+        Serial.println("Water height: " + String(waterHeight) + " cm");
       }
     }
     // Stage 2: Motor 2 (ENA) continues running until user presses STOP
