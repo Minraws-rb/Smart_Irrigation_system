@@ -25,7 +25,7 @@ const char* password = "12345678";      // AP password (min 8 characters)
 // Vessel parameters
 const float VESSEL_HEIGHT = 16.0;    // Height of vessel in cm
 const float VESSEL_AREA = 153.0;     // Base area in cm² (circle)
-const float EMPTY_THRESHOLD = 0.6;   // Consider empty if water height < 1cm
+const float EMPTY_THRESHOLD = 0.2;   // Consider empty if water height < 1cm
 
 // Global variables
 WebServer server(80);
