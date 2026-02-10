@@ -9,6 +9,7 @@ const char* password = "12345678";      // AP password (min 8 characters)
 // Pin definitions
 #define LED_PIN 2        // Built-in LED for motor mixing indicator
 #define PUMP_PIN 4       // Pin for pump control (if needed later)
+#define SOIL_MOISTURE_PIN 4  // Soil moisture sensor pin (D4)
 
 // Ultrasonic sensor pin definitions
 #define TRIG_PIN 19      // Ultrasonic sensor trigger pin
@@ -35,11 +36,18 @@ bool motor1Running = false;  // ENB motor (mixing motor)
 bool motor2Running = false;  // ENA motor (pump motor)
 unsigned long motor1StartTime = 0;
 unsigned long motor1EndTime = 0;
-
+// Motor speed variables (0-255)
+int motor1Speed = 255;  // Mixing motor speed (default max)
+int motor2Speed = 180;  // Pump motor speed (default max)
 // Water volume variables
 float waterDistance = 0;    // Distance from sensor to water surface in cm
 float waterHeight = 0;      // Height of water in vessel in cm
 float waterVolume = 0;      // Volume of water in cm³
+
+// Soil moisture sensor
+int soilMoistureValue = 0;  // Analog reading from moisture sensor (0-4095)
+const int DRY_THRESHOLD = 2500;  // Values above this = dry soil
+bool isSoilDry = false;     // true = soil is dry, false = soil is wet
 
 // HTML page (your irrigation control interface)
 const char htmlPage[] PROGMEM = R"rawliteral(
@@ -323,12 +331,31 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                 <span class="status-value" id="waterVolume" style="font-weight: bold; color: #2196F3;">-- L</span>
             </div>
             <div class="status-item">
-                <span class="status-label">WiFi Signal</span>
-                <span class="status-value" id="wifiSignal">-- dBm</span>
+                <span class="status-label">🌱 Soil Status</span>
+                <span class="status-value" id="soilStatus" style="font-weight: bold;">--</span>
             </div>
         </div>
         
-        <!-- Motor Time Configuration -->
+        <!-- Motor Speed Control -->
+        <div class="control-section">
+            <div class="section-title">⚡ Motor Speed Control</div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="color: #333; font-weight: 600; display: block; margin-bottom: 8px;">Mixing Motor: <span id="motor1SpeedValue">255</span>/255</label>
+                <input type="range" id="motor1SpeedSlider" min="0" max="255" value="255" style="width: 100%;" onchange="setMotor1Speed()">
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="color: #333; font-weight: 600; display: block; margin-bottom: 8px;">Pump Motor: <span id="motor2SpeedValue">255</span>/255</label>
+                <input type="range" id="motor2SpeedSlider" min="0" max="255" value="255" style="width: 100%;" onchange="setMotor2Speed()">
+            </div>
+            
+            <div class="info-box">
+                ⚙️ 0 = Off | 127 = 50% Speed | 255 = Full Speed
+            </div>
+        </div>
+        
+        <!-- Motor Mixing Time -->
         <div class="control-section">
             <div class="section-title">⏱️ Set Motor Mixing Time</div>
             <div class="input-group">
@@ -405,8 +432,19 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                         document.getElementById('waterVolume').textContent = '-- L';
                     }
                     
-                    // WiFi signal
-                    document.getElementById('wifiSignal').textContent = data.rssi + ' dBm';
+                    // Update motor speeds
+                    document.getElementById('motor1SpeedValue').textContent = data.motor1Speed;
+                    document.getElementById('motor2SpeedValue').textContent = data.motor2Speed;
+                    
+                    // Update soil status
+                    const soilStatusEl = document.getElementById('soilStatus');
+                    if (data.soilDry) {
+                        soilStatusEl.textContent = 'DRY';
+                        soilStatusEl.style.color = '#f44336';
+                    } else {
+                        soilStatusEl.textContent = 'WET';
+                        soilStatusEl.style.color = '#4CAF50';
+                    }
                 })
                 .catch(err => console.error('Status update failed:', err));
         }
@@ -431,6 +469,30 @@ const char htmlPage[] PROGMEM = R"rawliteral(
                 .catch(err => {
                     showMessage('❌ Connection error', 'error');
                 });
+        }
+
+        function setMotor1Speed() {
+            const speed = document.getElementById('motor1SpeedSlider').value;
+            fetch('/setMotor1Speed?speed=' + speed)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('motor1SpeedValue').textContent = speed;
+                    }
+                })
+                .catch(err => console.error('Failed to set motor 1 speed'));
+        }
+
+        function setMotor2Speed() {
+            const speed = document.getElementById('motor2SpeedSlider').value;
+            fetch('/setMotor2Speed?speed=' + speed)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('motor2SpeedValue').textContent = speed;
+                    }
+                })
+                .catch(err => console.error('Failed to set motor 2 speed'));
         }
 
         function startSystem() {
@@ -577,7 +639,9 @@ void handleStatus() {
   json += "\"timeRemaining\":" + String(timeRemaining) + ",";
   json += "\"waterHeight\":" + String(waterHeight, 1) + ",";
   json += "\"waterVolume\":" + String(waterVolume, 1) + ",";
-  json += "\"rssi\":" + String(WiFi.RSSI());
+  json += "\"motor1Speed\":" + String(motor1Speed) + ",";
+  json += "\"motor2Speed\":" + String(motor2Speed) + ",";
+  json += "\"soilDry\":" + String(isSoilDry ? "true" : "false");
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -608,19 +672,19 @@ void handleStart() {
     motor1EndTime = motor1StartTime + (motorMixTime * 1000);
     digitalWrite(LED_PIN, HIGH);  // Turn on LED when motor starts
     
-    // Start Motor 1 (ENB side - mixing motor)
+    // Start Motor 1 (ENB side - mixing motor) with PWM speed control
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
-    digitalWrite(ENB, HIGH);
+    analogWrite(ENB, motor1Speed);
     
     // Ensure Motor 2 is off
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
-    digitalWrite(ENA, LOW);
+    analogWrite(ENA, 0);
     
-    String json = "{\"success\":true,\"motorTime\":" + String(motorMixTime) + "}";
+    String json = "{\"success\":true,\"motorTime\":" + String(motorMixTime) + ",\"motor1Speed\":" + String(motor1Speed) + "}";
     server.send(200, "application/json", json);
-    Serial.println("System started! Motor 1 (ENB) mixing for " + String(motorMixTime) + " seconds");
+    Serial.println("System started! Motor 1 (ENB) mixing at speed " + String(motor1Speed) + " for " + String(motorMixTime) + " seconds");
   } else {
     server.send(200, "application/json", "{\"success\":false,\"error\":\"System already running\"}");
   }
@@ -645,6 +709,38 @@ void handleStop() {
   Serial.println("System stopped - Both motors OFF");
 }
 
+// Handle set Motor 1 speed (Pump motor)
+void handleSetMotor1Speed() {
+  if (server.hasArg("speed")) {
+    int speed = server.arg("speed").toInt();
+    if (speed >= 0 && speed <= 255) {
+      motor1Speed = speed;
+      server.send(200, "application/json", "{\"success\":true,\"motor1Speed\":" + String(motor1Speed) + "}");
+      Serial.println("Motor 1 speed set to: " + String(motor1Speed));
+    } else {
+      server.send(400, "application/json", "{\"success\":false,\"error\":\"Speed must be 0-255\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing speed parameter\"}");
+  }
+}
+
+// Handle set Motor 2 speed (Mixing motor)
+void handleSetMotor2Speed() {
+  if (server.hasArg("speed")) {
+    int speed = server.arg("speed").toInt();
+    if (speed >= 0 && speed <= 255) {
+      motor2Speed = speed;
+      server.send(200, "application/json", "{\"success\":true,\"motor2Speed\":" + String(motor2Speed) + "}");
+      Serial.println("Motor 2 speed set to: " + String(motor2Speed));
+    } else {
+      server.send(400, "application/json", "{\"success\":false,\"error\":\"Speed must be 0-255\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing speed parameter\"}");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -658,6 +754,8 @@ void setup() {
   // Initialize ultrasonic sensor pins
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
+  
+  // Soil moisture sensor uses analog input (no pinMode needed for analog)
   
   // Initialize motor driver pins
   pinMode(ENA, OUTPUT);
@@ -702,6 +800,8 @@ void setup() {
   server.on("/setMotorTime", handleSetMotorTime);
   server.on("/start", handleStart);
   server.on("/stop", handleStop);
+  server.on("/setMotor1Speed", handleSetMotor1Speed);
+  server.on("/setMotor2Speed", handleSetMotor2Speed);
   
   server.begin();
   Serial.println("Web server started!");
@@ -718,30 +818,34 @@ void loop() {
     lastMeasurement = millis();
   }
   
+  // Read soil moisture sensor (analog 0-4095, higher = drier)
+  soilMoistureValue = analogRead(SOIL_MOISTURE_PIN);
+  isSoilDry = soilMoistureValue > DRY_THRESHOLD;
+  
   // Handle two-stage motor operation
   if (systemRunning) {
     unsigned long currentTime = millis();
     
-    // Stage 1: Motor 1 (ENB) runs for specified time
+    // Stage 1: Motor 1 (ENB - mixing motor) runs for specified time
     if (motor1Running) {
       if (currentTime >= motor1EndTime) {
-        // Stop Motor 1 (ENB)
+        // Stop Motor 1 (ENB - mixing motor)
         motor1Running = false;
         digitalWrite(IN3, LOW);
         digitalWrite(IN4, LOW);
-        digitalWrite(ENB, LOW);
+        analogWrite(ENB, 0);
         
-        // Start Motor 2 (ENA) - runs until STOP is pressed or vessel is empty
+        // Start Motor 2 (ENA - pump motor) - runs until STOP is pressed or vessel is empty
         motor2Running = true;
         digitalWrite(IN1, HIGH);
         digitalWrite(IN2, LOW);
-        digitalWrite(ENA, HIGH);
+        analogWrite(ENA, motor2Speed);
         
-        Serial.println("Motor 1 (ENB) complete! Motor 2 (ENA) started - will run until STOP or vessel empty");
+        Serial.println("Motor 1 (ENB - mixing) complete! Motor 2 (ENA - pump) started at speed " + String(motor2Speed) + " - will run until STOP or vessel empty");
       }
     }
     
-    // Stage 2: Motor 2 (ENA) - auto-stop if vessel is empty
+    // Stage 2: Motor 2 (ENA - pump motor) - auto-stop if vessel is empty
     if (motor2Running) {
       if (waterHeight < EMPTY_THRESHOLD) {
         // Vessel is empty, stop the pump
@@ -749,14 +853,12 @@ void loop() {
         systemRunning = false;
         digitalWrite(IN1, LOW);
         digitalWrite(IN2, LOW);
-        digitalWrite(ENA, LOW);
+        analogWrite(ENA, 0);
         digitalWrite(LED_PIN, LOW);
         
-        Serial.println("Vessel empty! Motor 2 (ENA) stopped automatically");
+        Serial.println("Vessel empty! Motor 2 (ENA - pump) stopped automatically");
         Serial.println("Water height: " + String(waterHeight) + " cm");
       }
     }
-    // Stage 2: Motor 2 (ENA) continues running until user presses STOP
-    // No automatic stop for Motor 2
   }
 }
